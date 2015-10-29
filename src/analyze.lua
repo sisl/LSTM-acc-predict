@@ -3,18 +3,26 @@ local analyze = {}
 
 -- Random sample from predicted distributions
 local function sample(prediction)
-    if prediction:size(2) == 2 then
-        local rand_samples = torch.randn(m) -- generate m samples from standard normal distribution
-        return torch.cmul(prediction[{{}, 2}], rand_samples) + prediction[{{}, 1}]
-    else
-        local n = prediction:size(2)/3
-        local acc = torch.Tensor(m):zero()
-        for i = 1, n do
-            rand_samples = torch.randn(m)
-            pred = torch.cmul(prediction[{{}, 2*n + i}], rand_samples) + prediction[{{}, n + i}]
-            acc = acc + torch.cmul(prediction[{{}, i}], pred)
+    if opt.mixture_size >= 1 then 
+        if prediction:size(2) == 2 then
+            local rand_samples = torch.randn(m) -- generate m samples from standard normal distribution
+            return torch.cmul(prediction[{{}, 2}], rand_samples) + prediction[{{}, 1}]
+        else
+            local n = prediction:size(2)/3
+            local acc = torch.Tensor(m):zero()
+            for i = 1, n do
+                rand_samples = torch.randn(m)
+                pred = torch.cmul(prediction[{{}, 2*n + i}], rand_samples) + prediction[{{}, n + i}]
+                acc = acc + torch.cmul(prediction[{{}, i}], pred)
+            end
+            return acc
         end
-        return acc
+    else
+        local bin_size = 8/opt.nbins
+        local probs = torch.exp(prediction)
+        probs:div(torch.sum(probs))
+        local bins = torch.multinomial(probs, 1):double() -- sample bins from softmax
+        return ((bins - 1) * bin_size):squeeze() + torch.rand(m) * bin_size - 5 -- sample within bin
     end
 end
 
@@ -80,7 +88,7 @@ local function propagate(states, target, x_lead, s_lead, plot)
             local prediction = lst[#lst] -- last element holds the acceleration prediction
             local acc = sample(prediction)
 
-        	x[{t+1, {}, 1}] = x[{t, {}, 1}] + torch.mul(x[{t, {}, 4}], 0.1) + torch.mul(x[{t, {}, 5}], 0.01) -- x_ego(t + dt)
+        	x[{t+1, {}, 1}] = x[{t, {}, 1}] + torch.mul(x[{t, {}, 4}], 0.1) + torch.mul(acc, 0.01) -- x_ego(t + dt)
             x[{t+1, {}, 2}] = -x[{t+1, {}, 1}] + x_lead[t - 20] -- d(t + dt)
             x[{t+1, {}, 4}] = x[{t, {}, 4}] + torch.mul(x[{t, {}, 5}], 0.1) -- s(t + dt)
             x[{t+1, {}, 3}] = -x[{t+1, {}, 4}] + s_lead[t - 20] -- r(t + dt)
@@ -117,8 +125,8 @@ function analyze.findError(loader)
     protos.rnn:evaluate()
 
     target = torch.reshape(target, loader.batches*opt.batch_size, 100)
-    x_lead = torch.reshape(target, loader.batches*opt.batch_size, 100)
-    s_lead = torch.reshape(target, loader.batches*opt.batch_size, 100)
+    x_lead = torch.reshape(x_lead, loader.batches*opt.batch_size, 100)
+    s_lead = torch.reshape(s_lead, loader.batches*opt.batch_size, 100)
 
     -- Create tensor to hold errors over different horizons
     local err = torch.Tensor(states:size(1), 10)

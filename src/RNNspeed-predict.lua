@@ -7,11 +7,13 @@ require 'torch'
 require 'nngraph'
 require 'util.misc'
 require 'util.error'
-require 'randomkit'
 require 'normalNLL'
+local analyze = require 'analyze'
 local CarDataLoader = require 'util.CarDataLoader'
 local model_utils = require 'util.model_utils'
-local LSTM = require 'model.LSTMnorm'
+local LSTMnorm = require 'model.LSTMnorm'
+local LSTM = require 'model.LSTM'
+local convert = require 'util.convert'
 
 
 cmd = torch.CmdLine()
@@ -22,7 +24,8 @@ cmd:text('Options')
 -- model params
 cmd:option('-nn_size', 64, 'size of LSTM internal state')
 cmd:option('-num_layers', 2, 'number of layers in the LSTM')
-cmd:option('-mixture_size', 1, 'number of Gaussian mixtures in output layer')
+cmd:option('-mixture_size', 0, 'number of Gaussian mixtures in output layer')
+cmd:option('-nbins', 0, 'number of bins if performing softmax')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
@@ -71,13 +74,23 @@ local loader = CarDataLoader.create(opt.nfolds, opt.batch_size, true)
 print('creating an LSTM with ' .. opt.num_layers .. ' layers')
 if opt.mixture_size == 1 then 
     outputs = 2
-else
+elseif opt.mixture_size > 1 then
     outputs = 3*opt.mixture_size
+elseif opt.nbins > 1 then
+    outputs = opt.nbins
+else
+    error('no prediction method selected')
 end
 inputs = 4
 protos = {}
-protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
-protos.criterion = normalNLL(opt.mixture_size) 
+
+if opt.mixture_size >= 1 then
+    protos.rnn = LSTMnorm.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
+    protos.criterion = normalNLL(opt.mixture_size) 
+else
+    protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
+    protos.criterion = nn.ClassNLLCriterion()
+end
 
 -- the initial state of the cell/hidden states
 init_state = {}
@@ -141,7 +154,11 @@ feval = function(params_new)
         -- Initialize internal state with 2 sec of data; only calculate loss after this
         if t > 20 then
         	predictions[t] = lst[#lst] -- last element is the prediction
-        	loss = loss + clones.criterion[t]:forward(predictions[t], y[{{}, t - 20}])
+            if opt.mixture_size >= 1 then
+        	    loss = loss + clones.criterion[t]:forward(predictions[t], y[{{}, t - 20}])
+            else
+                loss = loss + clones.criterion[t]:forward(predictions[t], convert.toBins(y[{{}, t - 20}], opt.nbins))
+            end
         end
     end
     loss = loss / 100
@@ -150,8 +167,14 @@ feval = function(params_new)
     local drnn_state = {[120] = clone_list(init_state, true)} -- true also zeros the clones
     for t=120,21,-1 do
         -- backprop through loss, and softmax/linear
-        local doutput_t = clones.criterion[t]:backward(predictions[t], y[{{}, t - 20}])
-        table.insert(drnn_state[t], doutput_t)
+        if opt.mixture_size >= 1 then
+            local doutput_t = clones.criterion[t]:backward(predictions[t], y[{{}, t - 20}])
+            table.insert(drnn_state[t], doutput_t)
+        else
+            local doutput_t = clones.criterion[t]:backward(predictions[t], convert.toBins(y[{{}, t - 20}], opt.nbins))
+            table.insert(drnn_state[t], doutput_t)
+        end
+        
         local dlst = clones.rnn[t]:backward({x[{{}, t}], unpack(rnn_state[t-1])}, drnn_state[t])
         drnn_state[t-1] = {}
         for k,v in pairs(dlst) do
@@ -178,7 +201,6 @@ rms_params = {
 }
 
 -- Define overall prediction horizon in sec
-horizon = 10 
 local train_loss = 0
 
 -- Set validation set
@@ -227,14 +249,28 @@ if opt.savenet then
     torch.save(savefile, checkpoint)
 end
 
-print(mean_error)
-
 print('Evaluating loss on validation set for fold ' .. loader.valSet .. '...')
 -- Evaluate the validation losses
 local timer = torch.Timer()
-RWSE = RNNerror.findError(loader)
+RWSE = analyze.findError(loader)
+
+-- Evaluate loss on validation set
+-- Define batch indices
+loader.batch_ix = {loader.valSet, 0}
+loader.val = true
+loader.moreBatches = true
+
+val_loss = 0
+
+-- Iterate over all batches in all folds in validation set
+iterations = loader.batches
+for j = 1, iterations do
+    local _, loss = optim.rmsprop(feval, params, rms_params)
+    val_loss = val_loss + loss[1] -- the loss is inside a list, pop it
+end
 local time = timer:time().real
 print(string.format("It took %.2fs to evaluate validation loss", time))
+print(string.format('Average loss on validation set is %.3f', val_loss/iterations))
 
 
 

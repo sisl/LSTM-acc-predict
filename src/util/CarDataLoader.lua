@@ -36,8 +36,8 @@ function CarDataLoader.create(nfolds, batch_size, RNN)
     
     -- Separate target velocities and accelerations (acceleration is used in training, rest is used in validation)
     local vel = Y[{{}, {}, {1}}]
-    local x_lead = Y[{{}, {}, {3}}]
-    local s_lead = Y[{{}, {}, {4}}]
+    local x_lead = Y[{{}, {}, {4}}]
+    local s_lead = Y[{{}, {}, {3}}]
     Y = Y[{{}, {}, {2}}]
     collectgarbage()
 
@@ -53,6 +53,7 @@ function CarDataLoader.create(nfolds, batch_size, RNN)
 
     -- Set counter to track which set is being held as validation set
     self.valSet = 0
+    self.val = false
 
     -- Store # of folds, batch size and # batches/fold
     self.nfolds = nfolds
@@ -75,31 +76,48 @@ function CarDataLoader:next_batch()
 
     local ix = self.batch_ix
 
-    -- Check if fold was initialized to be validation set
-    if ix[1] == self.valSet then
-        ix[1] = ix[1] + 1
-    end
-
-    -- Increment to next batch, move to next fold if necessary
-    if ix[2] + 1 <= self.batches then
-        ix[2] = ix[2] + 1
-    else
-        if ix[1] + 1 == self.valSet then
-            ix = {ix[1] + 2, 1}
-        else
-            ix = {ix[1] + 1, 1}
+    if self.val then 
+        -- Check if fold was initialized to be validation set
+        if ix[1] ~= self.valSet then
+            error('validation set not selected')
         end
+
+        -- Increment to next batch, move to next fold if necessary
+        if ix[2] + 1 <= self.batches then
+            ix[2] = ix[2] + 1
+        else
+            self.moreBatches = false
+        end
+
+        -- Store new indices
+        self.batch_ix = ix
+
+    else
+        -- Check if fold was initialized to be validation set
+        if ix[1] == self.valSet then
+            ix[1] = ix[1] + 1
+        end
+
+        -- Increment to next batch, move to next fold if necessary
+        if ix[2] + 1 <= self.batches then
+            ix[2] = ix[2] + 1
+        else
+            if ix[1] + 1 == self.valSet then
+                ix = {ix[1] + 2, 1}
+            else
+                ix = {ix[1] + 1, 1}
+            end
+        end
+
+        -- Check if any training batches are left
+        if (ix[1] == self.nfolds or (ix[1] == self.nfolds - 1 and self.valSet == self.nfolds)) and
+            ix[2] == self.batches then
+            self.moreBatches = false
+        end
+
+        -- Store new indices
+        self.batch_ix = ix
     end
-
-    -- Check if any training batches are left
-    if (ix[1] == self.nfolds or (ix[1] == self.nfolds - 1 and self.valSet == self.nfolds)) and
-        ix[2] == self.batches then
-        self.moreBatches = false
-    end
-
-
-    -- Store new indices
-    self.batch_ix = ix
 
     return self.X[ix[1]][ix[2]], self.Y[ix[1]][ix[2]]
 end
