@@ -14,6 +14,7 @@ local model_utils = require 'util.model_utils'
 local LSTMnorm = require 'model.LSTMnorm'
 local LSTM = require 'model.LSTM'
 local convert = require 'util.convert'
+local iterUtil = require 'util.iterUtil'
 
 
 cmd = torch.CmdLine()
@@ -26,6 +27,7 @@ cmd:option('-nn_size', 64, 'size of LSTM internal state')
 cmd:option('-num_layers', 2, 'number of layers in the LSTM')
 cmd:option('-mixture_size', 0, 'number of Gaussian mixtures in output layer')
 cmd:option('-nbins', 0, 'number of bins if performing softmax')
+cmd:option('-iter', false, 'whether to perform iterative estimation of distribution')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
@@ -72,24 +74,38 @@ end
 local loader = CarDataLoader.create(opt.nfolds, opt.batch_size, true)
 
 print('creating an LSTM with ' .. opt.num_layers .. ' layers')
-if opt.mixture_size == 1 then 
-    outputs = 2
-elseif opt.mixture_size > 1 then
-    outputs = 3*opt.mixture_size
-elseif opt.nbins > 1 then
-    outputs = opt.nbins
+assert(opt.mixture_size == 0 or opt.nbins == 0, 'must select only one method')
+
+-- Specify number of outputs depending on distribution type
+if opt.iter then
+    outputs = opt.mixture_size + opt.nbins
 else
-    error('no prediction method selected')
+    if opt.mixture_size == 1 then 
+        outputs = 2
+    elseif opt.mixture_size > 1 then
+        outputs = 3*opt.mixture_size
+    elseif opt.nbins > 1 then
+        outputs = opt.nbins
+    else
+        error('no prediction method selected')
+    end
 end
 inputs = 4
 protos = {}
 
-if opt.mixture_size >= 1 then
+-- Set criterion, again depends on mixture type
+if opt.mixture_size >= 1 and not opt.iter then
     protos.rnn = LSTMnorm.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
     protos.criterion = normalNLL(opt.mixture_size) 
 else
     protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
-    protos.criterion = nn.ClassNLLCriterion()
+
+    if not opt.iter then
+        protos.criterion = nn.ClassNLLCriterion()
+    else
+        mu, sigma = iterUtil.initNormal(opt.mixture_size)
+        protos.criterion = normalNLL(opt.mixture_size, mu, sigma)
+    end
 end
 
 -- the initial state of the cell/hidden states
@@ -236,6 +252,11 @@ for i = 1, opt.epochs do
 			train_loss = 0
 		end
 	end
+
+    if opt.iter then 
+        print('Updating distribution parameters...')
+        iterUtil.updateNormal(loader)
+    end
     collectgarbage()
 end
 
@@ -252,7 +273,7 @@ end
 print('Evaluating loss on validation set for fold ' .. loader.valSet .. '...')
 -- Evaluate the validation losses
 local timer = torch.Timer()
-RWSE = analyze.findError(loader)
+-- RWSE = analyze.findError(loader)
 
 -- Evaluate loss on validation set
 -- Define batch indices

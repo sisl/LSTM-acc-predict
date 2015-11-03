@@ -65,6 +65,9 @@ local function propagate(states, target, x_lead, s_lead, plot)
         s_lead = s_lead:cuda()
     end
 
+    -- Initialize internal state
+    current_state = init_state
+
     -- Find lead vehicle position at t = 0
     local x_lead0 = x_lead[1] - 0.1*s_lead[1]
 
@@ -113,14 +116,14 @@ function analyze.findError(loader)
     m = 3
 
     -- Initialize network
-    current_state = {}
+    init_state = {}
     for L=1,opt.num_layers do
         local h_init = torch.zeros(m, opt.nn_size)
         if opt.gpuid >=0 then h_init = h_init:cuda() end
-        table.insert(current_state, h_init:clone())
-        table.insert(current_state, h_init:clone())
+        table.insert(init_state, h_init:clone())
+        table.insert(init_state, h_init:clone())
     end
-    state_size = #current_state
+    state_size = #init_state
     states = torch.reshape(states, loader.batches*opt.batch_size, 120, 4)
     protos.rnn:evaluate()
 
