@@ -8,6 +8,7 @@ require 'nngraph'
 require 'util.misc'
 require 'util.error'
 require 'normalNLL'
+require 'iterativeNLL'
 local analyze = require 'analyze'
 local CarDataLoader = require 'util.CarDataLoader'
 local model_utils = require 'util.model_utils'
@@ -26,6 +27,7 @@ cmd:text('Options')
 cmd:option('-nn_size', 64, 'size of LSTM internal state')
 cmd:option('-num_layers', 2, 'number of layers in the LSTM')
 cmd:option('-mixture_size', 0, 'number of Gaussian mixtures in output layer')
+cmd:option('-multinomial_size', 0, 'number of multinomial distributions')
 cmd:option('-nbins', 0, 'number of bins if performing softmax')
 cmd:option('-iter', false, 'whether to perform iterative estimation of distribution')
 -- optimization
@@ -78,7 +80,7 @@ assert(opt.mixture_size == 0 or opt.nbins == 0, 'must select only one method')
 
 -- Specify number of outputs depending on distribution type
 if opt.iter then
-    outputs = opt.mixture_size + opt.nbins
+    outputs = opt.mixture_size + opt.multinomial_size
 else
     if opt.mixture_size == 1 then 
         outputs = 2
@@ -102,9 +104,12 @@ else
 
     if not opt.iter then
         protos.criterion = nn.ClassNLLCriterion()
-    else
-        mu, sigma = iterUtil.initNormal(opt.mixture_size)
+    elseif opt.mixture_size >= 1 then
+        mu, sigma = iterUtil.initNormal()
         protos.criterion = normalNLL(opt.mixture_size, mu, sigma)
+    else
+        probs = iterUtil.initMultinomial()
+        protos.criterion = iterativeNLL(opt.nbins, probs)
     end
 end
 
@@ -255,7 +260,11 @@ for i = 1, opt.epochs do
 
     if opt.iter then 
         print('Updating distribution parameters...')
-        iterUtil.updateNormal(loader)
+        if opt.mixture_size > 1 then
+            iterUtil.updateNormal(loader)
+        else
+            iterUtil.updateMultinomial(loader)
+        end
     end
     collectgarbage()
 end
@@ -273,25 +282,25 @@ end
 print('Evaluating loss on validation set for fold ' .. loader.valSet .. '...')
 -- Evaluate the validation losses
 local timer = torch.Timer()
--- RWSE = analyze.findError(loader)
+RWSE = analyze.findError(loader)
 
--- Evaluate loss on validation set
--- Define batch indices
-loader.batch_ix = {loader.valSet, 0}
-loader.val = true
-loader.moreBatches = true
+-- -- Evaluate loss on validation set
+-- -- Define batch indices
+-- loader.batch_ix = {loader.valSet, 0}
+-- loader.val = true
+-- loader.moreBatches = true
 
-val_loss = 0
+-- val_loss = 0
 
--- Iterate over all batches in all folds in validation set
-iterations = loader.batches
-for j = 1, iterations do
-    local _, loss = optim.rmsprop(feval, params, rms_params)
-    val_loss = val_loss + loss[1] -- the loss is inside a list, pop it
-end
-local time = timer:time().real
-print(string.format("It took %.2fs to evaluate validation loss", time))
-print(string.format('Average loss on validation set is %.3f', val_loss/iterations))
+-- -- Iterate over all batches in all folds in validation set
+-- iterations = loader.batches
+-- for j = 1, iterations do
+--     local _, loss = optim.rmsprop(feval, params, rms_params)
+--     val_loss = val_loss + loss[1] -- the loss is inside a list, pop it
+-- end
+-- local time = timer:time().real
+-- print(string.format("It took %.2fs to evaluate validation loss", time))
+-- print(string.format('Average loss on validation set is %.3f', val_loss/iterations))
 
 
 

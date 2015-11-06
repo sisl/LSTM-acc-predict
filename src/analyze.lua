@@ -2,27 +2,54 @@ require 'gnuplot'
 local analyze = {}
 
 -- Random sample from predicted distributions
-local function sample(prediction)
-    if opt.mixture_size >= 1 then 
-        if prediction:size(2) == 2 then
-            local rand_samples = torch.randn(m) -- generate m samples from standard normal distribution
-            return torch.cmul(prediction[{{}, 2}], rand_samples) + prediction[{{}, 1}]
-        else
-            local n = prediction:size(2)/3
+local function sample(prediction, protos)
+    if opt.mixture_size >= 1 then -- Gaussian mixture
+        
+        -- Iterative Gaussian mixture
+        if opt.iter then 
+            local n = prediction:size(2)
             local acc = torch.Tensor(m):zero()
             for i = 1, n do
-                rand_samples = torch.randn(m)
-                pred = torch.cmul(prediction[{{}, 2*n + i}], rand_samples) + prediction[{{}, n + i}]
-                acc = acc + torch.cmul(prediction[{{}, i}], pred)
+                rand_samples = torch.randn(m) -- Random sample from unit normal dist
+                pred = rand_samples * protos.criterion.sigma[i] + protos.criterion.mu[i] -- convert to normal w/ given mu and sigma
+                acc = acc + torch.cmul(torch.exp(prediction[{{}, i}]), pred) -- apply weights
             end
             return acc
+
+        -- Deep neural network prediction on Gaussian mixture
+        else
+            if prediction:size(2) == 2 then
+                local rand_samples = torch.randn(m) -- generate m samples from standard normal distribution
+                return torch.cmul(prediction[{{}, 2}], rand_samples) + prediction[{{}, 1}]
+            else
+                local n = prediction:size(2)/3
+                local acc = torch.Tensor(m):zero()
+                for i = 1, n do
+                    rand_samples = torch.randn(m)
+                    pred = torch.cmul(prediction[{{}, 2*n + i}], rand_samples) + prediction[{{}, n + i}] -- convert
+                    acc = acc + torch.cmul(prediction[{{}, i}], pred)
+                end
+                return acc
+            end
         end
+
+    -- Softmax
     else
         local bin_size = 8/opt.nbins
-        local probs = torch.exp(prediction)
-        probs:div(torch.sum(probs))
-        local bins = torch.multinomial(probs, 1):double() -- sample bins from softmax
-        return ((bins - 1) * bin_size):squeeze() + torch.rand(m) * bin_size - 5 -- sample within bin
+        if opt.iter then
+            local w = torch.exp(prediction)
+            local probs = torch.zeros(m, opt.nbins)
+            for i = 1, m do
+                local w_tensor = torch.repeatTensor(w[{i, {}}], opt.nbins, 1):transpose(1, 2)
+                probs[{i, {}}] = torch.sum(torch.cmul(protos.criterion.pmf, w_tensor), 1):squeeze()
+            end
+            local bins = torch.multinomial(probs, 1):double() -- sample bins from softmax
+            return ((bins - 1) * bin_size):squeeze() + torch.rand(m) * bin_size - 5 -- sample within bin 
+        else
+            local probs = torch.exp(prediction)
+            local bins = torch.multinomial(probs, 1):double() -- sample bins from softmax
+            return ((bins - 1) * bin_size):squeeze() + torch.rand(m) * bin_size - 5 -- sample within bin
+        end
     end
 end
 
@@ -89,7 +116,7 @@ local function propagate(states, target, x_lead, s_lead, plot)
         for i=1,state_size do table.insert(current_state, lst[i]) end
         if t > 20 then -- Generate predictions after 2 sec
             local prediction = lst[#lst] -- last element holds the acceleration prediction
-            local acc = sample(prediction)
+            local acc = sample(prediction, protos)
 
         	x[{t+1, {}, 1}] = x[{t, {}, 1}] + torch.mul(x[{t, {}, 4}], 0.1) + torch.mul(acc, 0.01) -- x_ego(t + dt)
             x[{t+1, {}, 2}] = -x[{t+1, {}, 1}] + x_lead[t - 20] -- d(t + dt)
