@@ -92,15 +92,15 @@ else
         error('no prediction method selected')
     end
 end
-inputs = 4
+inputs = 4 -- size of input state
 protos = {}
 
--- Set criterion, again depends on mixture type
+-- Set criterion, again depends on output type
 if opt.mixture_size >= 1 and not opt.iter then
-    protos.rnn = LSTMnorm.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
+    protos.rnn = LSTMnorm.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout) -- LSTM with Gaussian mixture output
     protos.criterion = normalNLL(opt.mixture_size) 
 else
-    protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout)
+    protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout) -- LSTM with softmax output
 
     if not opt.iter then
         protos.criterion = nn.ClassNLLCriterion()
@@ -168,7 +168,14 @@ feval = function(params_new)
     local predictions = {}  
     local loss = 0
     for t=1,120 do
-        clones.rnn[t]:training() -- make sure we are in correct mode (this is cheap, sets flag)
+
+        -- Set network to proper mode for training/evaluation
+        if loader.val then
+            clones.rnn[t]:evaluate()
+        else
+            clones.rnn[t]:training() 
+        end
+
         local lst = clones.rnn[t]:forward{x[{{}, t}], unpack(rnn_state[t-1])}
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
@@ -183,34 +190,38 @@ feval = function(params_new)
         end
     end
     loss = loss / 100
-    ------------------ backward pass -------------------
-    -- initialize gradient at time t to be zeros (there's no influence from future)
-    local drnn_state = {[120] = clone_list(init_state, true)} -- true also zeros the clones
-    for t=120,21,-1 do
-        -- backprop through loss, and softmax/linear
-        if opt.mixture_size >= 1 then
-            local doutput_t = clones.criterion[t]:backward(predictions[t], y[{{}, t - 20}])
-            table.insert(drnn_state[t], doutput_t)
-        else
-            local doutput_t = clones.criterion[t]:backward(predictions[t], convert.toBins(y[{{}, t - 20}], opt.nbins))
-            table.insert(drnn_state[t], doutput_t)
-        end
-        
-        local dlst = clones.rnn[t]:backward({x[{{}, t}], unpack(rnn_state[t-1])}, drnn_state[t])
-        drnn_state[t-1] = {}
-        for k,v in pairs(dlst) do
-            if k > 1 then -- k == 1 is gradient on x, which we dont need
-                -- then we do k-1 to start with derivative of states
-                drnn_state[t-1][k-1] = v
+
+    -- Perform backprop if not evaluating loss on validation set
+    if loader.val == false then 
+        ------------------ backward pass -------------------
+        -- initialize gradient at time t to be zeros (there's no influence from future)
+        local drnn_state = {[120] = clone_list(init_state, true)} -- true also zeros the clones
+        for t=120,21,-1 do
+            -- backprop through loss, and softmax/linear
+            if opt.mixture_size >= 1 then
+                local doutput_t = clones.criterion[t]:backward(predictions[t], y[{{}, t - 20}])
+                table.insert(drnn_state[t], doutput_t)
+            else
+                local doutput_t = clones.criterion[t]:backward(predictions[t], convert.toBins(y[{{}, t - 20}], opt.nbins))
+                table.insert(drnn_state[t], doutput_t)
+            end
+            
+            local dlst = clones.rnn[t]:backward({x[{{}, t}], unpack(rnn_state[t-1])}, drnn_state[t])
+            drnn_state[t-1] = {}
+            for k,v in pairs(dlst) do
+                if k > 1 then -- k == 1 is gradient on x, which we dont need
+                    -- then we do k-1 to start with derivative of states
+                    drnn_state[t-1][k-1] = v
+                end
             end
         end
+        ------------------------ misc ----------------------
+        -- transfer final state to initial state (BPTT)
+        init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
+        -- clip gradient element-wise
+        grad_params:clamp(-opt.grad_clip, opt.grad_clip)
+        collectgarbage()
     end
-    ------------------------ misc ----------------------
-    -- transfer final state to initial state (BPTT)
-    init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
-    -- clip gradient element-wise
-    grad_params:clamp(-opt.grad_clip, opt.grad_clip)
-    collectgarbage()
     return loss, grad_params
 end
 
@@ -228,9 +239,38 @@ local train_loss = 0
 loader.valSet = opt.valSet
 print('Fold ' .. loader.valSet .. ' being used as validation set')
 
+-- Function to evaluate loss on validation set
+function valLoss()
+    print('Evaluating loss on validation set for fold ' .. loader.valSet .. '...')
+
+    -- Evaluate loss on validation set
+    -- Define batch indices
+    loader.batch_ix = {loader.valSet, 0}
+    loader.val = true
+    loader.moreBatches = true
+
+    val_loss = 0
+
+    -- Iterate over all batches in all folds in validation set
+    iterations = loader.batches
+    for j = 1, iterations do
+        local _, loss = optim.rmsprop(feval, params, rms_params)
+        val_loss = val_loss + loss[1] -- the loss is inside a list, pop it
+    end
+    print(string.format('Average loss on validation set is %.3f', val_loss/iterations))
+    return val_loss/iterations
+end
+
+-- Initialize validation loss
+local old_loss = 1e6
 for i = 1, opt.epochs do
+    -- val_loss = valLoss()
+    -- old_loss = val_loss
+    -- if val_loss - old_loss > -0.01 then break end
+
 	-- Reset batch indices
 	loader.batch_ix = {1, 0}
+    loader.val = false
 	loader.moreBatches = true
 
 	-- exponential learning rate decay
@@ -239,7 +279,6 @@ for i = 1, opt.epochs do
         local decay_factor = opt.learning_rate_decay
         rms_params.learningRate = rms_params.learningRate * decay_factor -- decay it
     end
-
 	-- Iterate over all batches in all folds in training set
 	iterations = (opt.nfolds - 1) * loader.batches
 	for j = 1, iterations do
@@ -260,11 +299,7 @@ for i = 1, opt.epochs do
 
     if opt.iter then 
         print('Updating distribution parameters...')
-        if opt.mixture_size > 1 then
-            iterUtil.updateNormal(loader)
-        else
-            iterUtil.updateMultinomial(loader)
-        end
+        iterUtil.updateDist(loader)
     end
     collectgarbage()
 end
@@ -279,28 +314,8 @@ if opt.savenet then
     torch.save(savefile, checkpoint)
 end
 
-print('Evaluating loss on validation set for fold ' .. loader.valSet .. '...')
--- Evaluate the validation losses
-local timer = torch.Timer()
-RWSE = analyze.findError(loader)
-
--- -- Evaluate loss on validation set
--- -- Define batch indices
--- loader.batch_ix = {loader.valSet, 0}
--- loader.val = true
--- loader.moreBatches = true
-
--- val_loss = 0
-
--- -- Iterate over all batches in all folds in validation set
--- iterations = loader.batches
--- for j = 1, iterations do
---     local _, loss = optim.rmsprop(feval, params, rms_params)
---     val_loss = val_loss + loss[1] -- the loss is inside a list, pop it
--- end
--- local time = timer:time().real
--- print(string.format("It took %.2fs to evaluate validation loss", time))
--- print(string.format('Average loss on validation set is %.3f', val_loss/iterations))
+-- Perform analysis on validation set
+analyze.findError(loader)
 
 
 
