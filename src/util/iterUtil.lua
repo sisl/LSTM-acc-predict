@@ -1,6 +1,7 @@
 local convert = require 'util.convert'
 local iterUtil = {}
 
+-- Initialize iterative Gaussian mixture
 function iterUtil.initNormal()
 	-- Initialize means and standard deviations
 	local mu = torch.linspace(-4, 2, opt.mixture_size)
@@ -9,6 +10,7 @@ function iterUtil.initNormal()
 	return mu, sigma
 end
 
+-- Initialize iterative softmax
 function iterUtil.initMultinomial()
 	local n = opt.multinomial_size
 	local probs = torch.zeros(n, opt.nbins)
@@ -29,13 +31,14 @@ function iterUtil.initMultinomial()
 	return probs
 end
 
+-- Find weights applied to each component of distribution
 local function findWeights(input)
 
     -- Tensors to hold weight and target values
     local w = torch.zeros(input:size(1), 100, outputs)
 
     -- Initialize internal state of network
-    current_state = init_state
+    current_state = initial_state
 
     -- forward pass
     for t=1,120 do
@@ -73,7 +76,7 @@ local function updateParams(ws, targets)
 	return mu_new[{1, {}}], sigma_new[{1, {}}]
 end
 
--- Update probabilities in multinomial distribution
+-- Update probabilities in softmax distribution
 local function updateProbs(ws, targets)
 	local new_probs = torch.zeros(ws:size(2), opt.nbins)
 	for i = 1, ws:size(1) do
@@ -119,14 +122,14 @@ function iterUtil.updateDist(loader)
     collectgarbage()
 
 	-- Initialize network
-    init_state = {}
+    initial_state = {}
     for L=1,opt.num_layers do
         local h_init = torch.zeros(dim, opt.nn_size)
         if opt.gpuid >=0 then h_init = h_init:cuda() end
-        table.insert(init_state, h_init:clone())
-        table.insert(init_state, h_init:clone())
+        table.insert(initial_state, h_init:clone())
+        table.insert(initial_state, h_init:clone())
     end
-    state_size = #init_state
+    state_size = #initial_state
 
 	-- Find weights and target values, then reshape
 	ws = findWeights(input)

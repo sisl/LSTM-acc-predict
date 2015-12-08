@@ -6,7 +6,6 @@ require 'optim'
 require 'torch'
 require 'nngraph'
 require 'util.misc'
-require 'util.error'
 require 'normalNLL'
 require 'iterativeNLL'
 local analyze = require 'analyze'
@@ -14,7 +13,7 @@ local CarDataLoader = require 'util.CarDataLoader'
 local model_utils = require 'util.model_utils'
 local LSTMnorm = require 'model.LSTMnorm'
 local LSTM = require 'model.LSTM'
-local convert = require 'util.convert'
+convert = require 'util.convert'
 local iterUtil = require 'util.iterUtil'
 
 
@@ -32,6 +31,7 @@ cmd:option('-nbins', 0, 'number of bins if performing softmax')
 cmd:option('-iter', false, 'whether to perform iterative estimation of distribution')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
+cmd:option('-dropout',0,'dropout for regularization, used after each hidden layer. 0 = no dropout')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
 cmd:option('-learning_rate_decay_after',10,'in number of epochs, when to start decaying the learning rate')
 cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
@@ -44,7 +44,7 @@ cmd:option('-grad_clip',5,'clip gradients at this value')
 cmd:option('-seed',123,'torch manual random number generator seed')
 -- saving network
 cmd:option('-checkpoint_dir', 'nets', 'output directory where checkpoints get written')
-cmd:option('-savefile','lstm_accPred2','filename to autosave the checkpont to. Will be inside checkpoint_dir/')
+cmd:option('-savefile','lstm','filename to autosave the checkpont to. Will be inside checkpoint_dir/')
 cmd:option('-savenet', false, 'whether to save network parameters')
 -- GPU/CPU
 cmd:option('-gpuid',-1,'which gpu to use. -1 = use CPU')
@@ -54,7 +54,7 @@ cmd:text()
 opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
 
--- initialize cunn/cutorch for training on the and fall back to CPU gracefully
+-- initialize cunn/cutorch for training
 if opt.gpuid >= 0 then
     local ok, cunn = pcall(require, 'cunn')
     local ok2, cutorch = pcall(require, 'cutorch')
@@ -62,7 +62,7 @@ if opt.gpuid >= 0 then
     if not ok2 then print('package cutorch not found!') end
     if ok and ok2 then
         print('using CUDA on GPU ' .. opt.gpuid .. '...')
-        cutorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
+        cutorch.setDevice(opt.gpuid + 1) 
         cutorch.manualSeed(opt.seed)
     else
         print('If cutorch and cunn are installed, your CUDA toolkit may be improperly configured.')
@@ -92,7 +92,7 @@ else
         error('no prediction method selected')
     end
 end
-inputs = 4 -- size of input state
+inputs = 5 -- size of input state
 protos = {}
 
 -- Set criterion, again depends on output type
@@ -163,6 +163,8 @@ feval = function(params_new)
         x = x:cuda()
         y = y:cuda()
     end
+
+    prev_acc = torch.zeros(opt.batch_size)
     ------------------- forward pass -------------------
     local rnn_state = {[0] = init_state_global}
     local predictions = {}  
@@ -176,7 +178,8 @@ feval = function(params_new)
             clones.rnn[t]:training() 
         end
 
-        local lst = clones.rnn[t]:forward{x[{{}, t}], unpack(rnn_state[t-1])}
+        local lst = clones.rnn[t]:forward{convert.augmentInput(x[{{}, t}]), unpack(rnn_state[t-1])}
+        prev_acc = x[{{}, t, 4}]
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
         -- Initialize internal state with 2 sec of data; only calculate loss after this
@@ -206,7 +209,7 @@ feval = function(params_new)
                 table.insert(drnn_state[t], doutput_t)
             end
             
-            local dlst = clones.rnn[t]:backward({x[{{}, t}], unpack(rnn_state[t-1])}, drnn_state[t])
+            local dlst = clones.rnn[t]:backward({convert.augmentInput(x[{{}, t}]), unpack(rnn_state[t-1])}, drnn_state[t])
             drnn_state[t-1] = {}
             for k,v in pairs(dlst) do
                 if k > 1 then -- k == 1 is gradient on x, which we dont need
@@ -264,21 +267,16 @@ end
 -- Initialize validation loss
 local old_loss = 1e6
 for i = 1, opt.epochs do
-    -- val_loss = valLoss()
-    -- old_loss = val_loss
-    -- if val_loss - old_loss > -0.01 then break end
+
+    val_loss = valLoss()
+    if val_loss - old_loss > -0.01 then break end
+    old_loss = val_loss
 
 	-- Reset batch indices
 	loader.batch_ix = {1, 0}
     loader.val = false
 	loader.moreBatches = true
 
-	-- exponential learning rate decay
-    if i >= opt.learning_rate_decay_after then
-        assert(opt.learning_rate_decay < 1, 'Learning rate decay will cause it to grow')
-        local decay_factor = opt.learning_rate_decay
-        rms_params.learningRate = rms_params.learningRate * decay_factor -- decay it
-    end
 	-- Iterate over all batches in all folds in training set
 	iterations = (opt.nfolds - 1) * loader.batches
 	for j = 1, iterations do
@@ -304,7 +302,7 @@ for i = 1, opt.epochs do
     collectgarbage()
 end
 
--- every now and then or on last iteration
+-- Save network parameters
 if opt.savenet then
     local savefile = string.format('%s/%s_epochs%.2f_%.4f.t7', opt.checkpoint_dir, opt.savefile, opt.epochs, last_loss)
     print('saving checkpoint to ' .. savefile)

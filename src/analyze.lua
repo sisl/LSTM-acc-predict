@@ -6,7 +6,7 @@ local analyze = {}
 local function sample(prediction, protos)
     if opt.mixture_size >= 1 then -- Gaussian mixture
         
-        -- Iterative Gaussian mixture
+        -- Iterative Gaussian mixture (don't really use anymore, maybe delete)
         if opt.iter then 
             local n = prediction:size(2)
             local acc = torch.Tensor(m):zero()
@@ -38,7 +38,7 @@ local function sample(prediction, protos)
     else
         local bin_size = 8/opt.nbins
 
-        -- Iterative softmax
+        -- Iterative softmax (don't really use anymore, maybe delete)
         if opt.iter then
             local w = torch.exp(prediction)
             local probs = torch.zeros(m, opt.nbins)
@@ -89,14 +89,15 @@ local function propagate(states, target, x_lead, s_lead)
        -- Fill in states at t = -2 sec to t = 0
 	   x[{{1, 21}, i, {2, 5}}] = states[{{1, 21}, {}}]
 
-       input[{{}, i, {}}] = states
+       -- Fill in input with true state for propagating oracle
+       input[{{}, i}] = states
     end
 
     -- forward pass
+    -- NOTE: input and output to the network differ by one time step i.e. if input corresponds to
+    -- t = 21 then output will correspond to t = 22.  Mapping from t -> time: t = 21 <-> time = 0 sec
     for t=1,120 do
-        local lst = protos.rnn:forward{input[{t, {}, {}}], unpack(current_state)}
-        -- local lst = protos.rnn:forward{x[{t, {}, {2, 5}}], unpack(current_state)}
-        -- lst is a list of [state1,state2,..stateN,output]. We want everything but last piece
+        local lst = protos.rnn:forward{convert.augmentInput(x[{t, {}, {2, 5}}]), unpack(current_state)}
         current_state = {}
         for i=1,state_size do table.insert(current_state, lst[i]) end
         if t > 20 then -- Generate predictions after 2 sec
@@ -105,7 +106,7 @@ local function propagate(states, target, x_lead, s_lead)
 
         	x[{t+1, {}, 1}] = x[{t, {}, 1}] + torch.mul(x[{t, {}, 4}], 0.1) + torch.mul(acc, 0.01) -- x_ego(t + dt)
             x[{t+1, {}, 2}] = -x[{t+1, {}, 1}] + x_lead[t - 20] -- d(t + dt)
-            x[{t+1, {}, 4}] = x[{t, {}, 4}] + torch.mul(x[{t, {}, 5}], 0.1) -- s(t + dt)
+            x[{t+1, {}, 4}] = x[{t, {}, 4}] + torch.mul(acc, 0.1) -- s(t + dt)
             x[{t+1, {}, 3}] = -x[{t+1, {}, 4}] + s_lead[t - 20] -- r(t + dt)
             x[{t+1, {}, 5}] = acc -- a(t + dt)
         end   
@@ -133,12 +134,12 @@ local function toFile(dir, data)
     end
 end
 
-
--- Function to store network output and true acceleration value throughout trajectory
+-- Function to store network output and true acceleration value throughout trajectory, used to create GIFs of 
+-- distributions
 local function storeOutput(states, target)
 
     -- Create inputs and outputs
-    local out = torch.zeros(100, outputs + 1)
+    local out = torch.zeros(100, outputs + 2)
     local x = torch.zeros(120, 1, 4)
     x[{{}, 1, {}}] = states
 
@@ -159,10 +160,9 @@ local function storeOutput(states, target)
     local state_size = #init_state
 
     -- forward pass
-    -- NOTE: input and output to the network differ by one time step i.e. if input corresponds to
-    -- t = 21 then output will correspond to t = 22.  Mapping from t -> time: t = 21 <-> time = 0 sec
     for t=1,120 do
-        local lst = protos.rnn:forward{x[{t, {}, {}}], unpack(current_state)}
+        local input = convert.augmentInput(x[{t, {}, {}}])
+        local lst = protos.rnn:forward{input, unpack(current_state)}
         current_state = {}
         for i=1,state_size do table.insert(current_state, lst[i]) end
 
@@ -173,11 +173,12 @@ local function storeOutput(states, target)
                 out[{t - 20, {1, outputs}}] = torch.exp(lst[#lst]) -- exponential on softmax
             end
             out[{t - 20, outputs + 1}] = target[t - 20] -- store true acceleration value
+            out[{t - 20, outputs + 2}] = input[{1, input:size(2)}] -- store IDM prediction
         end   
     end
 
     -- Store outputs and distribution parameters
-    toFile('outputs', out)
+    toFile('outputs/idm', out)
     
 end
 
@@ -192,7 +193,7 @@ function analyze.findError(loader)
     local s_lead = loader.s_lead[loader.valSet]
 
     --Define # of trajectories to simulate
-    m = 5
+    m = 50
 
     -- Initialize network
     init_state = {}
@@ -223,20 +224,20 @@ function analyze.findError(loader)
         if target[i][100] ~= 0 then -- Avoid wasting time on abbreviated trajectories
             size = size + 1
             if size == 1 then
-                -- storeOutput(states[i], acc[i])
+                storeOutput(states[i], acc[i])
             end
 
             -- Propagate simulated trajectories and store output
             sim[size] = propagate(states[i], target[i], x_lead[i], s_lead[i])
 
-            -- Store true trajectory values
+            -- Combine and store true trajectory values
             local d = torch.cat(states[{i, {22, 120}, 1}], torch.Tensor({0}))
             local r = torch.cat(states[{i, {22, 120}, 2}], torch.Tensor({0}))
             local dr = torch.cat(d, r, 2)
             local va = torch.cat(target[i], acc[i], 2)
             real[size] = torch.cat(dr, va, 2)
         end
-        if i%500 == 0 then print(i) end
+        if i%500 == 0 then print(i) end -- track progress
     end
 
     -- Get rid of empty values
@@ -249,7 +250,7 @@ function analyze.findError(loader)
     collectgarbage()
 
     -- Write data to csv
-    toFile('analysis/true_state/', torch.cat(sim, real, 2))
+    toFile('analysis', torch.cat(sim, real, 2))
 end
 
 return analyze

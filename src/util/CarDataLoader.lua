@@ -1,28 +1,19 @@
-
 -- Modified from char-rnn to read in NGSIM highway data
 
 local CarDataLoader = {}
 CarDataLoader.__index = CarDataLoader
 
 -- Note: horizon is in seconds
-function CarDataLoader.create(nfolds, batch_size, RNN)
-    local RNN = RNN or false
+function CarDataLoader.create(nfolds, batch_size)
 
     local self = {}
     setmetatable(self, CarDataLoader)
 
-    if RNN then 
-        -- Assume data file is in data directory (it should be)
-        x_file = '/Users/jeremymorton/Documents/Summer_2015/vehicle-rnns/data/X_reconst_RNN.t7'
-        y_file = '/Users/jeremymorton/Documents/Summer_2015/vehicle-rnns/data/Y_reconst_RNN.t7'
-        assert(path.exists(x_file), 'Input data file not found')
-        assert(path.exists(y_file), 'Target data file not found')
-    else
-        x_file = '/Users/jeremymorton/Documents/Summer_2015/vehicle-rnns/data/X_reconst1.t7'
-        y_file = '/Users/jeremymorton/Documents/Summer_2015/vehicle-rnns/data/Y_reconst_RNN.t7'
-        assert(path.exists(x_file), 'Input data file not found')
-        assert(path.exists(y_file), 'Target data file not found')
-    end
+    -- Assume data file is in data directory (it should be)
+    x_file = '/Users/jeremymorton/Documents/AA_228/Final_Project/data/X_reconst_RNN.t7'
+    y_file = '/Users/jeremymorton/Documents/AA_228/Final_Project/data/Y_reconst_RNN.t7'
+    assert(path.exists(x_file), 'Input data file not found')
+    assert(path.exists(y_file), 'Target data file not found')
 
     -- Load data
     print('loading data files...')
@@ -122,38 +113,6 @@ function CarDataLoader:next_batch()
     return self.X[ix[1]][ix[2]], self.Y[ix[1]][ix[2]]
 end
 
-function toInput(states)
-     -- Initialize tensor to hold final set of inputs
-    local input = torch.Tensor(states:size(1), 100, 20)
-
-    for i = 1, states:size(1) do -- Loop over folds
-        for j = 21, 120 do -- Loop over time steps
-            -- Create input tensor at given time step
-            input[{i, j - 20, {1, 4}}] = states[{i, j - 4,  {}}]
-            input[{i, j - 20, {5, 8}}] = states[{i, j - 8,  {}}]
-            input[{i, j - 20, {9, 12}}] = states[{i, j - 12,  {}}]
-            input[{i, j - 20, {13, 16}}] = states[{i, j - 16,  {}}]
-            input[{i, j - 20, {17, 20}}] = states[{i, j - 20,  {}}]
-        end
-    end
-    return input
-end
-
--- Binned accelerations must be in ByteTensors
-function toBytes(Y)
-    -- Convert acceleration targets to byte tensor
-    local ydata = torch.ByteTensor(#Y)
-    for i=1, Y:size(1) do
-        for j=1, Y:size(2) do
-            if Y[i][j][1] == 0 then -- replace space-filling values w/ bin # for 0 acceleration
-                ydata[i][j][1] = 7
-            else
-                ydata[i][j][1] = Y[i][j][1]
-            end
-        end
-    end
-    return ydata
-end
 
 return CarDataLoader
 
