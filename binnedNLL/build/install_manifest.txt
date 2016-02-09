@@ -1,0 +1,3 @@
+/Users/jeremymorton/torch/install/lib/luarocks/rocks/normalnll/scm-1/lua/normalNLL/init.lua
+/Users/jeremymorton/torch/install/lib/luarocks/rocks/normalnll/scm-1/lua/normalNLL/normalNLL.lua
+/Users/jeremymorton/torch/install/lib/luarocks/rocks/normalnll/scm-1/lua/normalNLL/test.lua
