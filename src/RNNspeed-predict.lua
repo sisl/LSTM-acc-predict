@@ -1,5 +1,6 @@
 -- Script that creates a recurrent neural network for speed prediction
 -- Largely based off of char-rnn by Andrej Karpathy
+-- https://github.com/karpathy/char-rnn
 
 require 'nn'
 require 'optim'
@@ -7,14 +8,12 @@ require 'torch'
 require 'nngraph'
 require 'util.misc'
 require 'normalNLL'
-require 'iterativeNLL'
 local analyze = require 'analyze'
 local CarDataLoader = require 'util.CarDataLoader'
 local model_utils = require 'util.model_utils'
 local LSTMnorm = require 'model.LSTMnorm'
 local LSTM = require 'model.LSTM'
 convert = require 'util.convert'
-local iterUtil = require 'util.iterUtil'
 
 
 cmd = torch.CmdLine()
@@ -28,12 +27,11 @@ cmd:option('-num_layers', 2, 'number of layers in the LSTM')
 cmd:option('-mixture_size', 0, 'number of Gaussian mixtures in output layer')
 cmd:option('-multinomial_size', 0, 'number of multinomial distributions')
 cmd:option('-nbins', 0, 'number of bins if performing softmax')
-cmd:option('-iter', false, 'whether to perform iterative estimation of distribution')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-dropout',0,'dropout for regularization, used after each hidden layer. 0 = no dropout')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
-cmd:option('-learning_rate_decay_after',10,'in number of epochs, when to start decaying the learning rate')
+cmd:option('-learning_rate_decay_after',3,'in number of epochs, when to start decaying the learning rate')
 cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
 cmd:option('-nfolds',10,'number of folds to use in cross-validation')
 cmd:option('-valSet', 1, 'fold to be held out as validation set')
@@ -79,38 +77,30 @@ print('creating an LSTM with ' .. opt.num_layers .. ' layers')
 assert(opt.mixture_size == 0 or opt.nbins == 0, 'must select only one method')
 
 -- Specify number of outputs depending on distribution type
-if opt.iter then
-    outputs = opt.mixture_size + opt.multinomial_size
+if opt.mixture_size == 1 then 
+    outputs = 2
+elseif opt.mixture_size > 1 then
+    outputs = 3*opt.mixture_size
+elseif opt.nbins > 1 then
+    outputs = opt.nbins
+
+    print('Finding bin boundaries...')
+    bounds = convert.findBoundaries(loader, opt.nbins)
+    print(bounds)
 else
-    if opt.mixture_size == 1 then 
-        outputs = 2
-    elseif opt.mixture_size > 1 then
-        outputs = 3*opt.mixture_size
-    elseif opt.nbins > 1 then
-        outputs = opt.nbins
-    else
-        error('no prediction method selected')
-    end
+    error('no prediction method selected')
 end
-inputs = 5 -- size of input state
+inputs = 4 -- size of input state
 protos = {}
+
 
 -- Set criterion, again depends on output type
 if opt.mixture_size >= 1 and not opt.iter then
     protos.rnn = LSTMnorm.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout) -- LSTM with Gaussian mixture output
     protos.criterion = normalNLL(opt.mixture_size) 
 else
-    protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout) -- LSTM with softmax output
-
-    if not opt.iter then
-        protos.criterion = nn.ClassNLLCriterion()
-    elseif opt.mixture_size >= 1 then
-        mu, sigma = iterUtil.initNormal()
-        protos.criterion = normalNLL(opt.mixture_size, mu, sigma)
-    else
-        probs = iterUtil.initMultinomial()
-        protos.criterion = iterativeNLL(opt.nbins, probs)
-    end
+    protos.rnn = LSTM.lstm(inputs, outputs, opt.nn_size, opt.num_layers, opt.dropout) -- LSTM with piecewise uniform output
+    protos.criterion = nn.ClassNLLCriterion()
 end
 
 -- the initial state of the cell/hidden states
@@ -159,7 +149,6 @@ feval = function(params_new)
     local x, y = loader:next_batch()
 
     if opt.gpuid >= 0 then -- ship the input arrays to GPU
-        -- have to convert to float because integers can't be cuda()'d
         x = x:cuda()
         y = y:cuda()
     end
@@ -178,8 +167,7 @@ feval = function(params_new)
             clones.rnn[t]:training() 
         end
 
-        local lst = clones.rnn[t]:forward{convert.augmentInput(x[{{}, t}]), unpack(rnn_state[t-1])}
-        prev_acc = x[{{}, t, 4}]
+        local lst = clones.rnn[t]:forward{convert.augmentInput(x[{{}, t}], loader), unpack(rnn_state[t-1])}
         rnn_state[t] = {}
         for i=1,#init_state do table.insert(rnn_state[t], lst[i]) end -- extract the state, without output
         -- Initialize internal state with 2 sec of data; only calculate loss after this
@@ -200,7 +188,7 @@ feval = function(params_new)
         -- initialize gradient at time t to be zeros (there's no influence from future)
         local drnn_state = {[120] = clone_list(init_state, true)} -- true also zeros the clones
         for t=120,21,-1 do
-            -- backprop through loss, and softmax/linear
+            -- backprop through loss
             if opt.mixture_size >= 1 then
                 local doutput_t = clones.criterion[t]:backward(predictions[t], y[{{}, t - 20}])
                 table.insert(drnn_state[t], doutput_t)
@@ -209,7 +197,7 @@ feval = function(params_new)
                 table.insert(drnn_state[t], doutput_t)
             end
             
-            local dlst = clones.rnn[t]:backward({convert.augmentInput(x[{{}, t}]), unpack(rnn_state[t-1])}, drnn_state[t])
+            local dlst = clones.rnn[t]:backward({convert.augmentInput(x[{{}, t}], loader), unpack(rnn_state[t-1])}, drnn_state[t])
             drnn_state[t-1] = {}
             for k,v in pairs(dlst) do
                 if k > 1 then -- k == 1 is gradient on x, which we dont need
@@ -220,27 +208,13 @@ feval = function(params_new)
         end
         ------------------------ misc ----------------------
         -- transfer final state to initial state (BPTT)
-        init_state_global = rnn_state[#rnn_state] -- NOTE: I don't think this needs to be a clone, right?
+        init_state_global = rnn_state[#rnn_state]
         -- clip gradient element-wise
         grad_params:clamp(-opt.grad_clip, opt.grad_clip)
         collectgarbage()
     end
     return loss, grad_params
 end
-
-
--- Set options for rmsprop
-rms_params = {
-	learningRate = opt.learning_rate,
-	alpha = opt.decay_rate
-}
-
--- Define overall prediction horizon in sec
-local train_loss = 0
-
--- Set validation set
-loader.valSet = opt.valSet
-print('Fold ' .. loader.valSet .. ' being used as validation set')
 
 -- Function to evaluate loss on validation set
 function valLoss()
@@ -264,10 +238,26 @@ function valLoss()
     return val_loss/iterations
 end
 
+-- Set options for rmsprop
+rms_params = {
+    learningRate = opt.learning_rate,
+    alpha = opt.decay_rate
+}
+
+-- Define overall prediction horizon in sec
+local train_loss = 0
+
+-- Set validation set
+loader.valSet = opt.valSet
+print('Fold ' .. loader.valSet .. ' being used as validation set')
+
 -- Initialize validation loss
 local old_loss = 1e6
+
+-- Loop through data for desired number of epochs
 for i = 1, opt.epochs do
 
+    -- Find validation loss; end training once validation loss has leveled off
     val_loss = valLoss()
     if val_loss - old_loss > -0.01 then break end
     old_loss = val_loss
@@ -277,16 +267,23 @@ for i = 1, opt.epochs do
     loader.val = false
 	loader.moreBatches = true
 
+    -- exponential learning rate decay
+    if i >= opt.learning_rate_decay_after then
+        local decay_factor = opt.learning_rate_decay
+        rms_params.learningRate = rms_params.learningRate * decay_factor -- decay it
+    end
+
 	-- Iterate over all batches in all folds in training set
 	iterations = (opt.nfolds - 1) * loader.batches
 	for j = 1, iterations do
 
+        -- Find loss for minibatch
 		local timer = torch.Timer()
     	local _, loss = optim.rmsprop(feval, params, rms_params)
     	local time = timer:time().real
+    	train_loss = train_loss + loss[1]
 
-    	train_loss = train_loss + loss[1] -- the loss is inside a list, pop it
-
+        -- Display loss
     	if (j + (i - 1)*iterations) % 10 == 0 then
 			print(string.format("%d/%d: train_loss = %6.8f, grad/param norm = %6.4e, time/batch = %.2fs", 
 				j + (i - 1)*iterations, opt.epochs*iterations, train_loss/10, grad_params:norm() / params:norm(), time))
@@ -294,11 +291,6 @@ for i = 1, opt.epochs do
 			train_loss = 0
 		end
 	end
-
-    if opt.iter then 
-        print('Updating distribution parameters...')
-        iterUtil.updateDist(loader)
-    end
     collectgarbage()
 end
 
@@ -311,9 +303,6 @@ if opt.savenet then
     checkpoint.opt = opt
     torch.save(savefile, checkpoint)
 end
-
--- Perform analysis on validation set
-analyze.findError(loader)
 
 
 

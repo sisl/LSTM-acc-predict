@@ -9,7 +9,7 @@ function CarDataLoader.create(nfolds, batch_size)
     local self = {}
     setmetatable(self, CarDataLoader)
 
-    -- Assume data file is in data directory (it should be)
+    -- Specify path to preprocessed data
     x_file = '/Users/jeremymorton/Documents/AA_228/Final_Project/data/X_reconst_RNN.t7'
     y_file = '/Users/jeremymorton/Documents/AA_228/Final_Project/data/Y_reconst_RNN.t7'
     assert(path.exists(x_file), 'Input data file not found')
@@ -20,6 +20,7 @@ function CarDataLoader.create(nfolds, batch_size)
     local X = torch.load(x_file)
     local Y = torch.load(y_file)
     
+    -- truncate data so that it can be divided evenly into batches
     if X:size(1) % (nfolds*batch_size) ~= 0 then
         X = X[{{1, math.floor(X:size(1)/(nfolds*batch_size)) * (nfolds*batch_size)}, {}, {}}]
         Y = Y[{{1, math.floor(X:size(1)/(nfolds*batch_size)) * (nfolds*batch_size)}, {}, {}}]
@@ -39,8 +40,19 @@ function CarDataLoader.create(nfolds, batch_size)
     self.X = torch.reshape(X, torch.LongStorage{nfolds, X:size(1)/(nfolds*batch_size), batch_size, X:size(2), X:size(3)})
     self.Y = torch.reshape(Y, torch.LongStorage{nfolds, Y:size(1)/(nfolds*batch_size), batch_size, Y:size(2)})
     self.vel = torch.reshape(vel, torch.LongStorage{nfolds, vel:size(1)/(nfolds*batch_size), batch_size, vel:size(2), vel:size(3)})
-    self.x_lead = torch.reshape(x_lead, torch.LongStorage{nfolds, x_lead:size(1)/(nfolds*batch_size), batch_size, x_lead:size(2), x_lead:size(3)})
-    self.s_lead = torch.reshape(s_lead, torch.LongStorage{nfolds, s_lead:size(1)/(nfolds*batch_size), batch_size, s_lead:size(2), s_lead:size(3)})
+    self.x_lead = torch.reshape(x_lead, torch.LongStorage{nfolds, x_lead:size(1)/(nfolds*batch_size), batch_size, x_lead:size(2)})
+    self.s_lead = torch.reshape(s_lead, torch.LongStorage{nfolds, s_lead:size(1)/(nfolds*batch_size), batch_size, s_lead:size(2)})
+
+    -- Calculate amount to shift and scale data by in order to have all data zero-mean and normalized
+    self.shift = torch.Tensor({torch.mean(self.X[{{}, {}, {}, {}, 1}]), 
+        torch.mean(self.X[{{}, {}, {}, {}, 2}]),
+        torch.mean(self.X[{{}, {}, {}, {}, 3}]),
+        torch.mean(self.X[{{}, {}, {}, {}, 4}])})
+
+    self.scale = torch.Tensor({torch.std(self.X[{{}, {}, {}, {}, 1}]), 
+        torch.std(self.X[{{}, {}, {}, {}, 2}]),
+        torch.std(self.X[{{}, {}, {}, {}, 3}]),
+        torch.std(self.X[{{}, {}, {}, {}, 4}])})
 
     -- Set counter to track which set is being held as validation set
     self.valSet = 0
@@ -63,6 +75,7 @@ function CarDataLoader.create(nfolds, batch_size)
     return self
 end
 
+-- Function toload next batch
 function CarDataLoader:next_batch()
 
     local ix = self.batch_ix

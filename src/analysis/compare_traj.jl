@@ -1,8 +1,10 @@
+module compare_traj
+export RWSE, separateData, getCSCAValues, getSimValues, retAccValues, 
+    KLDivergence, countInversions, jerk
+
 using DataFrames
 using Discretizers
-using PyPlot
 using StatsBase
-using HypothesisTests
 
 function separateData(data::DataFrame)
 	# Separate data into true and simulated values
@@ -43,9 +45,19 @@ end
 
 # Function to calculate jerk values -- approximated as change in acceleration over time step
 function jerk(acc::Vector)
-    j = zeros(length(acc) - 1)
-    for i = 2:length(acc)
-        j[i-1] = (acc[i] - acc[i - 1])/0.1
+    # Find total number of trajectories
+    n = convert(Int64, length(acc)/100)
+
+    # Initialize vector to hold jerk values
+    j = zeros(99*n)
+
+    # Loop over trajectories
+    for i = 1:n
+
+        # Loop over entry in trajectory and find jerk
+        for k = 2:100
+            j[(i - 1) * 99 + k - 1] = (acc[(i - 1) * 100 + k] - acc[(i - 1) * 100 + k - 1])/0.1
+        end
     end
     j
 end 
@@ -100,6 +112,16 @@ function simulateIDM(initState::Vector{Float64})
     return simState
 end  
 
+# Return vector of constant speed velocity values (i.e. the same velocity value repeated)
+function simulateCS(initVel::Float64)
+	return initVel * ones(99)
+end
+
+# Return vector of constant acceleration velocity values
+function simulateCA(initState::Vector{Float64})
+	return [initState[1] + 0.1*i*initState[2] for i = 0:98]
+end
+
 # Get KL Divergence for two distributions
 function KLDivergence(real::Vector{Float64}, sim::Vector{Float64}, nbins::Int64)
     bin_bounds = linspace(minimum(real), maximum(real), nbins)
@@ -125,6 +147,18 @@ function KLDivergence(real::Vector{Float64}, sim::Vector{Float64}, nbins::Int64)
 end 
 
 # Return simulated IDM values
+function getCSCAValues(true_vel, true_acc)
+    n = length(true_acc)
+    CS_vel = zeros(n)
+    CA_vel = zeros(n)
+    for i = 1:100:n-1
+        CS_vel[i:i+98] = simulateCS(true_vel[i])
+        CA_vel[i:i+98] = simulateCA([true_vel[i], true_acc[i]])
+    end
+    CS_vel, CA_vel
+end
+
+# Return simulated IDM values
 function getSimValues(true_d, true_r, true_vel, true_acc)
     n = length(true_acc)
     IDM_d = zeros(n)
@@ -144,151 +178,32 @@ end
 # Jerk sign inversions
 function countInversions(a::Vector{Float64})
     count = 0
-    n = length(a)
-    for i = 1:100:n-1
-        for j = i + 1:i + 98
-            if sign(a[j]) * sign(a[j - 1]) < 0
+    j = jerk(a)
+    n = length(j)
+    for i = 1:99:n-1
+        for k = i + 1:i + 98
+            if sign(j[k]) * sign(j[k - 1]) < 0
                 count += 1
             end
         end
     end
-    return count * 100 / n
+    return count * 99 / n
 end  
 
-# Array of filenames
-filenames = ["softmax.csv", "mixture.csv", "FF_softmax.csv", "../true_state/mixture.csv"]
-
-# Initialize dictionaries to hold arrays of true and simulated quantities
-sim = Dict()
-real = Dict()
-idm = Dict()
-
-# Define horizon over which to plot RWSE
-horizon = 5
-m = 5
-
-# Array of quantity names and units
-names = ["Distance to Lead Vehicle", "Relative Speed", "Speed", "Acceleration", "Jerk"]
-units = [" (m)", " (m/s)", " (m/s)", " (m/s^2)", " (m/s^3)"]
-
-# Loop over files
-for i = 1:length(filenames)
-	println(filenames[i] * ": ")
-	# Read in data from file
-	data = readtable("./augment/" * filenames[i], header=false)
-	total = length(data[:, 1])
-
-	# Separate data into individual compnents
-	sim[1], sim[2], sim[3], sim[4], real[1], real[2], real[3], real[4] = separateData(data)
-	idm[1], idm[2], idm[3], idm[4] = getSimValues(real[1], real[2], real[3], real[4])
-
-	# Get jerk values
-	sim[5] = jerk(sim[4])
-	real[5] = jerk(convert(Vector, real[4]))
-	idm[5] = jerk(idm[4])
-
-	println("Fraction of negative d values: $(length(sim[1][sim[1].< 0])/length(sim[1]))")
-
-	if i == 1
-		println("Fraction of real negative d values: $(length(real[1][real[1].< 0])/length(real[1]))")
-		println("Fraction of IDM negative d values: $(length(idm[1][idm[1].< 0])/length(idm[1]))")
-		println()
-	end
-
-	println("Fraction of negative speed values: $(length(sim[3][sim[3].< 0])/length(sim[3]))")
-
-	if i == 1
-		println("Fraction of real negative speed values: $(length(real[3][real[3].< 0])/length(real[3]))")
-		println("Fraction of IDM negative speed values: $(length(idm[3][idm[3].< 0])/length(idm[3]))")
-		println()
-	end
-
-	println("Jerk sign inversions per trajectory: $(countInversions(sim[5]))")
-
-	if i == 1
-		println("Real sign inversions per trajectory: $(countInversions(real[5]))")
-		println("IDM sign inversions per trajectory: $(countInversions(idm[5]))")
-		println()
-	end
-
-	# Loop over all quantities
-	for j = 1:5
-		println(names[j])
-		println(KLDivergence(convert(Vector{Float64}, real[j]), sim[j], 100))
-
-		# Generate plot
-		figure(j)
-		x = minimum(sim[j]):.1:maximum(sim[j])
-		ef = ecdf(sim[j])
-		if i == 1
-			println("IDM: ")
-			println(KLDivergence(convert(Vector{Float64}, real[j]), idm[j], 100))
-			ef1 = ecdf(real[j])
-			ef2 = ecdf(idm[j])
-			plot(x, ef1(x), x, ef2(x), x, ef(x), linewidth=2.0);
-		else
-			plot(x, ef(x), linewidth=2.0);
-		end
-
-		# RWSE plot
-		if j == 3
-			figure(6)
-			x = 1:horizon
-			if i == 1
-				plot(x, RWSE(idm[j], convert(Vector, real[j]), 1, horizon), "-o", linewidth=2.0);
-			end
-			plot(x, RWSE(sim[j], convert(Vector, real[j]), m, horizon), "-o", linewidth=2.0);
-		end
-
-		# Plot acceleration values throughout a trajectory
-		if j == 4
-			figure(7)
-			t = 0.1:0.1:10 # time vector
-			if i == 1
-				plot(t, real[j][1:100], t, sim[j][101:200], linewidth=2.0);
-			else
-				plot(t, sim[j][101:200], linewidth=2.0);
-			end
-		end
-		println()
-	end
+# Return acceleration values for trajectories defined by indices
+function retAccValues(trajValues::Vector{Float64}, idxs::Vector{Int64})
+    start1 = (idxs[1] - 1)*100 + 1
+    start2 = (idxs[2] - 1)*100 + 1
+    start3 = (idxs[3] - 1)*100 + 1
+    return trajValues[start1:start1+99], trajValues[start2:start2+99], trajValues[start3:start3+99]
 end
 
-savenames = ["d", "r", "s", "a", "jerk"]
-names_rwse = ["d_rwse", "r_rwse", "s_rwse", "a_rwse", "jerk_rwse"]
-legend_labels = ["True", "IDM", "Softmax", "Mixture", "Feedforward Softmax", "Oracle"]
-for i = 1:5
-	figure(i)
-	grid()
-	plt[:rc]("text", usetex=true)
-	plt[:rc]("font", family="serif")
-	xlabel(names[i] * units[i])
-	ylabel("Cumulative Probability")
-	title("Empirical Distributions of $(names[i])")
-	legend(legend_labels, loc="best")
-	savefig("./" * savenames[i] * ".pdf")
+# Get fraction of state values that are negative
+function getFracNeg(states::Vector{Float64})
+    return length(states[states .< 0])/length(states)
 end
 
-figure(6)
-grid()
-plt[:rc]("text", usetex=true)
-plt[:rc]("font", family="serif")
-xlabel("Time Horizon (sec)", fontsize=16)
-ylabel("RWSE (m/s)", fontsize=16)
-# title("RWSE of Speed")
-xticks(1:5)
-legend(legend_labels[2:end], loc="best")
-savefig("./" * names_rwse[3] * ".pdf")
-
-figure(7)
-grid()
-plt[:rc]("text", usetex=true)
-plt[:rc]("font", family="serif")
-xlabel("Time (sec)")
-ylabel("Acceleration (m/s^2)")
-title("Acceleration in True and Simulated Trajectories")
-legend(legend_labels, loc="best")
-savefig("./accelerations.pdf")
+end
 
 
 

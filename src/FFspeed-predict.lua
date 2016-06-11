@@ -1,9 +1,11 @@
 require 'nn'
+require 'nngraph'
 require 'optim'
 require 'torch'
+require 'normalNLL'
 local CarDataLoader = require 'util.CarDataLoader'
-convert = require 'util.convert'
-local FF_analyze = require 'FF_analyze'
+local convert = require 'util.convert'
+local FFGM = require 'model.FFGM'
 
 cmd = torch.CmdLine()
 cmd:text()
@@ -14,10 +16,13 @@ cmd:text('Options')
 cmd:option('-nn_size', 64, 'size of LSTM internal state')
 cmd:option('-num_layers', 2, 'number of layers in the LSTM')
 cmd:option('-nbins', 0, 'number of bins if performing softmax')
+cmd:option('-time_steps', 1, 'number of time steps worth of state values to pass as input')
+cmd:option('-mixture_size', 0, 'number of time steps worth of state values to pass as input')
 -- optimization
 cmd:option('-learning_rate',2e-3,'learning rate')
+cmd:option('-dropout',0,'dropout for regularization, used after each hidden layer. 0 = no dropout')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
-cmd:option('-learning_rate_decay_after',10,'in number of epochs, when to start decaying the learning rate')
+cmd:option('-learning_rate_decay_after',3,'in number of epochs, when to start decaying the learning rate')
 cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
 cmd:option('-nfolds',10,'number of folds to use in cross-validation')
 cmd:option('-valSet', 1, 'fold to be held out as validation set')
@@ -60,24 +65,42 @@ end
 -- Load data
 local loader = CarDataLoader.create(opt.nfolds, opt.batch_size, true)
 
--- Construct neural network
-model = nn.Sequential()
-inputs = 5; outputs = opt.nbins; HUs = opt.nn_size
-model:add(nn.Linear(inputs, HUs))
-model:add(nn.Tanh())
-for i = 2, opt.num_layers do
-	model:add(nn.Linear(HUs, HUs))
-	model:add(nn.Tanh())
-    model:add(nn.Dropout(opt.dropout))
+if opt.mixture_size == 1 then 
+    outputs = 2
+elseif opt.mixture_size > 1 then
+    outputs = 3*opt.mixture_size
+elseif opt.nbins > 0 then
+    outputs = opt.nbins
+else
+    error('no prediction method selected')
 end
-model:add(nn.Linear(HUs, outputs))
-model:add(nn.LogSoftMax())
+inputs = opt.time_steps * 4
 
--- Set loss criterion
-criterion = nn.ClassNLLCriterion()
+-- Construct neural network
+if opt.nbins > 0 then
+    model = nn.Sequential()
+    HUs = opt.nn_size
+    model:add(nn.Linear(inputs, HUs))
+    model:add(nn.ReLU())
+    for i = 2, opt.num_layers do
+	   model:add(nn.Linear(HUs, HUs))
+	   model:add(nn.ReLU())
+        model:add(nn.Dropout(opt.dropout))
+    end
+    model:add(nn.Linear(HUs, outputs))
+    model:add(nn.LogSoftMax())
+
+    -- Set loss criterion
+    criterion = nn.ClassNLLCriterion()
+else
+    -- Construct feedforward Gaussian mixture model
+    model = FFGM.ffgm(inputs, outputs, opt.nn_size, opt.dropout)
+    criterion = normalNLL(opt.mixture_size)
+end
 
 -- Get network parameters
 params, grad_params = model:getParameters()
+params:uniform(-0.08, 0.08) -- small numbers uniform
 
 -- Define function to evealuate the loss over a batch of 
 -- training data
@@ -102,36 +125,28 @@ feval = function(params_new)
         y = y:cuda()
     end
 
-    -- Set to training mode to use dropout
-    model:training()
+    -- Set network to proper mode for training/evaluation
+    if loader.val then
+        model:evaluate()
+    else
+        model:training() 
+    end
 
-    for i = 21, 120 do
+    for t = 21, 120 do
 
 		-- Evaluate loss and gradients
-    	loss = loss + criterion:forward(model:forward(convert.augmentInput(x[{{}, i}])), convert.toBins(y[{{}, i - 20}], opt.nbins))
-  		model:backward(convert.augmentInput(x[{{}, i}]), criterion:backward(model.output, convert.toBins(y[{{}, i - 20}], opt.nbins)))
+        if opt.mixture_size >= 1 then
+            loss = loss + criterion:forward(model:forward(convert.augmentFF(x, t, loader)), y[{{}, t - 20}])
+            model:backward(convert.augmentFF(x, t, loader), criterion:backward(model.output, y[{{}, t - 20}]))
+        else
+    	    loss = loss + criterion:forward(model:forward(convert.augmentFF(x, t, loader)), convert.toBins(y[{{}, t - 20}], opt.nbins))
+  		    model:backward(convert.augmentFF(x, t, loader), criterion:backward(model.output, convert.toBins(y[{{}, t - 20}], opt.nbins)))
+        end
   	end
   	loss = loss/100
   	grad_params:clamp(-opt.grad_clip, opt.grad_clip)
 	return loss, grad_params
   end
-
--- Set options for rmsprop
-rms_params = {
-	learningRate = opt.learning_rate,
-	alpha = opt.decay_rate
-}
-
--- Define overall prediction horizon in sec
-horizon = 10
-local train_loss = 0
-
-loader.valSet = opt.valSet
-print('Fold ' .. loader.valSet .. ' being used as validation set')
-
-
--- Initialize model parameters
-params:uniform(-0.08, 0.08)
 
 -- Function to evaluate loss on validation set
 function valLoss()
@@ -155,10 +170,26 @@ function valLoss()
     return val_loss/iterations
 end
 
+-- Set options for rmsprop
+rms_params = {
+    learningRate = opt.learning_rate,
+    alpha = opt.decay_rate
+}
+
+-- Define overall prediction horizon in sec
+horizon = 10
+local train_loss = 0
+
+loader.valSet = opt.valSet
+print('Fold ' .. loader.valSet .. ' being used as validation set')
+
 -- Initialize validation loss
 local old_loss = 1e6
+
+-- Loop for desired number of epochs
 for i = 1, opt.epochs do
 
+    -- Find validation loss; end training once validation loss has leveled off
     val_loss = valLoss()
     if val_loss - old_loss > -0.01 then break end
     old_loss = val_loss
@@ -203,29 +234,6 @@ if opt.savenet then
     checkpoint.opt = opt
     torch.save(savefile, checkpoint)
 end
-
--- Perform analysis on validation set
-FF_analyze.findError(loader)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
