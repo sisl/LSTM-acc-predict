@@ -1,13 +1,9 @@
-module compare_traj
-export RWSE, separateData, getCSCAValues, getSimValues, retAccValues, 
-    KLDivergence, countInversions, jerk
-
 using DataFrames
 using Discretizers
 using StatsBase
 
+# Separate data into true and simulated values
 function separateData(data::DataFrame)
-	# Separate data into true and simulated values
 	total_vals = length(data[1, :])
 	sim_size = total_vals - 4
 	sim_data = data[:, 1:sim_size]
@@ -146,7 +142,7 @@ function KLDivergence(real::Vector{Float64}, sim::Vector{Float64}, nbins::Int64)
     kld
 end 
 
-# Return simulated IDM values
+# Return simulated CS and CA values
 function getCSCAValues(true_vel, true_acc)
     n = length(true_acc)
     CS_vel = zeros(n)
@@ -202,11 +198,3 @@ end
 function getFracNeg(states::Vector{Float64})
     return length(states[states .< 0])/length(states)
 end
-
-end
-
-
-
-
-
-

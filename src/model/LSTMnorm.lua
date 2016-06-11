@@ -1,4 +1,4 @@
-
+-- LSTM model with output layer containing parameters to a Gaussian mixture
 local LSTM = {}
 function LSTM.lstm(input_size, output_size, rnn_size, n, dropout)
   dropout = dropout or 0 
