@@ -1,8 +1,6 @@
-# CS 221 Final Project #
+# Analysis of Recurrent Neural Networks forProbabilistic Modeling of Driver Behavior #
 
-Jeremy Morton -- 12/8/15
-
-**Note:** I am not allowed to distribute the data used for this project, so unfortunately this code will not run solely using the files in this repository.
+**Note:** The data used for this project is not included in this repository.  The reconstructed NGSIM data can be obtained by following the instructions [here](http://multitude-project.eu/enhanced-ngsim.html).
 
 ### List of Files ###
 
