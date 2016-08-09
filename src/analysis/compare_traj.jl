@@ -79,12 +79,12 @@ end
 # Intelligent driver model
 function IDM(state::Array{Float64})
     # Define model parameters
-    dmn = 5.301
-    T = 1.023
-    bcmf = 3.621
-    smx = 17.281
-    
-    amx = 3
+    dmn = 5.249
+    T = 0.918
+    bcmf = 3.811
+    smx = 17.837
+    amx = 0.758
+
     d = state[1]
     r = state[2]
     s = state[3]
